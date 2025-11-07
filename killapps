@@ -1,16 +1,34 @@
 #!/bin/bash
 
 # Edit this array to include the apps you want to kill
-apps_to_kill=(antimicrox mangohud)
+appsToKill=(antimicrox mangohud)
 
-# Get gamescope process to include in the kill list
-while IFS= read -r app; do
-    apps_to_kill+=("$app")
-done < <(ps -aux | grep gamescope | grep -vE "gamescopereaper|grep" | awk '{for(i=12;i<=NF;i++)printf "%s ", $i; print ""}' | awk '{print $1}' | sort -u)
-
-# Terminate all applications in list
-for app in "${apps_to_kill[@]}"; do
+# Kill all the process by the presence in appsToKill
+for app in "${appsToKill[@]}"; do
     if killall -q "$app" 2>/dev/null; then
         echo "✅ $app terminated"
     fi
 done
+
+# Get the GameScope PID
+gameScopePIDs=$(pgrep -f '^gamescope\b')
+
+kill_tree() {
+    local parent=$1
+    local children=$(pgrep -P "$parent")
+    for child in $children; do
+        kill_tree "$child"
+    done
+
+    local pname=$(ps -p "$parent" -o comm=)
+    if kill -9 "$parent" 2>/dev/null; then
+        echo "✅ $pname (PID $parent) terminated"
+    fi
+}
+
+# Killall the process and subprocess from gamescope
+for pid in $gameScopePIDs; do
+    kill_tree "$pid"
+done
+
+
