@@ -4,14 +4,7 @@
 appsToKill=(antimicrox mangohud)
 
 # Kill all the process by the presence in appsToKill
-for app in "${appsToKill[@]}"; do
-    if killall -q "$app" 2>/dev/null; then
-        echo "✅ $app terminated"
-    fi
-done
-
-# Get the GameScope PID
-gameScopePIDs=$(pgrep -f '^gamescope\b')
+gamescope_pids=$(pgrep -f '^gamescope\b')
 
 kill_tree() {
     local parent=$1
@@ -26,9 +19,13 @@ kill_tree() {
     fi
 }
 
-# Killall the process and subprocess from gamescope
-for pid in $gameScopePIDs; do
+for pid in $gamescope_pids; do
     kill_tree "$pid"
 done
 
-
+for pattern in "${apps_to_kill[@]}"; do
+    pids=$(pgrep -f "$pattern")
+    for pid in $pids; do
+        kill_tree "$pid"
+    done
+done
