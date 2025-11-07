@@ -4,7 +4,7 @@ Map joystick button combinations to shell commands
 
 ## Compile:
 ```bash
-gcc joystick.c -o joycmd
+gcc joycmd.c -o joycmd
 ```
 
 ## Run:

@@ -111,13 +111,12 @@ void ensure_config_exists() {
         }
 
         fprintf(f,
-            "# joycmd configuration file\n"
-            "# Each line maps a button combination to a shell command.\n"
-            "# Format: button1,button2,... = command\n"
-            "# Example:\n"
-            "# 9,10 = killsteam\n"
-            "# 0,1,2 = echo \"Combo secreto!\"\n\n"
-        );
+                "# joycmd configuration file\n"
+                "# Each line maps a button combination to a shell command.\n"
+                "# Format: button1,button2,... = command\n"
+                "# Example:\n"
+                "# 9,10 = killapps\n"
+                "# 0,1,2 = echo \"retroarch\"\n\n");
         fclose(f);
         printf("Created default config file at %s\n", CONFIG_FILE);
     }

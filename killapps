@@ -1,0 +1,16 @@
+#!/bin/bash
+
+# Edit this array to include the apps you want to kill
+apps_to_kill=(antimicrox mangohud)
+
+# Get gamescope process to include in the kill list
+while IFS= read -r app; do
+    apps_to_kill+=("$app")
+done < <(ps -aux | grep gamescope | grep -vE "gamescopereaper|grep" | awk '{for(i=12;i<=NF;i++)printf "%s ", $i; print ""}' | awk '{print $1}' | sort -u)
+
+# Terminate all applications in list
+for app in "${apps_to_kill[@]}"; do
+    if killall -q "$app" 2>/dev/null; then
+        echo "✅ $app terminated"
+    fi
+done
