@@ -7,9 +7,12 @@
 #include <string.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <poll.h>
+#include <time.h>
 
 #define MAX_BUTTONS 32
 #define MAX_COMBOS 32
+#define MAX_JOYSTICKS 8
 #define CONFIG_DIR "/etc/joycmd"
 #define CONFIG_FILE "/etc/joycmd/joycmd.conf"
 
@@ -19,19 +22,39 @@ struct combo {
     char command[256];
 };
 
-/**
- * Reads a joystick event from the joystick device.
- */
-int read_event(int fd, struct js_event *event) {
+struct joystick_device
+{
+    int fd;
+    char name[128];
+    int btnState[MAX_BUTTONS];
+    struct combo combos[MAX_COMBOS];
+    int combo_count;
+    char path[64];
+};
+
+/* ------------------ BASIC HELPERS ------------------ */
+
+static int read_event(int fd, struct js_event *event)
+{
     ssize_t bytes = read(fd, event, sizeof(*event));
     return (bytes == sizeof(*event)) ? 0 : -1;
 }
 
-/**
- * Load configuration from /etc/joycmd/joycmd.conf.
- * Returns number of combos loaded.
- */
-int load_config(struct combo combos[]) {
+static int check_combo(const struct combo *c, int *btnState)
+{
+    for (int i = 0; i < c->count; i++)
+    {
+        int btn = c->buttons[i];
+        if (btn >= 0 && !btnState[btn])
+            return 0;
+    }
+    return 1;
+}
+
+/* ------------------ CONFIG PARSING ------------------ */
+
+static int load_config(const char *joyname, struct combo combos[])
+{
     FILE *f = fopen(CONFIG_FILE, "r");
     if (!f) {
         perror("Could not open config file");
@@ -40,33 +63,48 @@ int load_config(struct combo combos[]) {
 
     char line[512];
     int count = 0;
+    char current_section[128] = "default";
+    int in_matching_section = 0;
+    int found_specific = 0;
 
     while (fgets(line, sizeof(line), f) && count < MAX_COMBOS) {
-        if (line[0] == '#' || strlen(line) < 3)
+        line[strcspn(line, "\r\n")] = '\0';
+        if (line[0] == '#' || strlen(line) < 2)
+            continue;
+
+        if (line[0] == '[')
+        {
+            char section[128];
+            if (sscanf(line, "[%127[^]]]", section) == 1)
+            {
+                strncpy(current_section, section, sizeof(current_section) - 1);
+                in_matching_section = (strcasecmp(current_section, joyname) == 0);
+                if (in_matching_section)
+                    found_specific = 1;
+            }
+            continue;
+        }
+
+        if (!in_matching_section && strcasecmp(current_section, "default") != 0)
             continue;
 
         char *eq = strchr(line, '=');
         if (!eq) continue;
 
         *eq = '\0';
-        char *buttons_str = strtok(line, " ,\t\n");
         char *cmd = eq + 1;
+        while (*cmd == ' ' || *cmd == '\t')
+            cmd++;
 
         struct combo c = {.count = 0};
         memset(c.buttons, -1, sizeof(c.buttons));
-        memset(c.command, 0, sizeof(c.command));
+        strncpy(c.command, cmd, sizeof(c.command) - 1);
 
-        // Parse buttons
         char *token = strtok(line, ",");
         while (token && c.count < MAX_BUTTONS) {
             c.buttons[c.count++] = atoi(token);
             token = strtok(NULL, ",");
         }
-
-        // Parse command
-        while (*cmd == ' ' || *cmd == '\t') cmd++;
-        cmd[strcspn(cmd, "\n")] = '\0';
-        strncpy(c.command, cmd, sizeof(c.command) - 1);
 
         combos[count++] = c;
     }
@@ -75,34 +113,19 @@ int load_config(struct combo combos[]) {
     return count;
 }
 
-/**
- * Check if all buttons in a combo are pressed.
- */
-int check_combo(const struct combo *c, int *btnState) {
-    for (int i = 0; i < c->count; i++) {
-        int btn = c->buttons[i];
-        if (btn < 0) continue;
-        if (!btnState[btn])
-            return 0;
-    }
-    return 1;
-}
+/* ------------------ CONFIG CREATION ------------------ */
 
-/**
- * Creates default config file if it doesn't exist.
- */
-void ensure_config_exists() {
+static void ensure_config_exists(void)
+{
     struct stat st;
 
-    // Create directory if missing
-    if (stat(CONFIG_DIR, &st) == -1) {
-        if (mkdir(CONFIG_DIR, 0755) == -1) {
-            perror("Could not create /etc/joycmd directory");
-            return;
-        }
+    if (stat(CONFIG_DIR, &st) == -1 && mkdir(CONFIG_DIR, 0755) == -1)
+    {
+        perror("Could not create /etc/joycmd directory");
+        printf("\n\033[33mPlease, run joycmd as root to create the config file\033[0m\n\n");
+        return;
     }
 
-    // Create file if missing
     if (stat(CONFIG_FILE, &st) == -1) {
         FILE *f = fopen(CONFIG_FILE, "w");
         if (!f) {
@@ -111,68 +134,187 @@ void ensure_config_exists() {
         }
 
         fprintf(f,
-                "# joycmd configuration file\n"
-                "# Each line maps a button combination to a shell command.\n"
-                "# Format: button1,button2,... = command\n"
-                "# Example:\n"
-                "# 9,10 = killapps\n"
-                "# 0,1,2 = echo \"retroarch\"\n\n");
+                "# joycmd configuration file with joystick sections\n"
+                "# Each section corresponds to a joystick name as detected by the system.\n"
+                "# Format:\n"
+                "# [Joystick Name]\n"
+                "# button1,button2,... = command\n\n"
+                "[default]\n"
+                "0,1,2 = echo \"Default combo\"\n\n"
+                "[Wireless Controller]\n"
+                "9,10 = killapps\n");
         fclose(f);
         printf("Created default config file at %s\n", CONFIG_FILE);
     }
 }
 
-int main(int argc, char *argv[]) {
-    const char *device = "/dev/input/js0";
+/* ------------------ JOYSTICK MANAGEMENT ------------------ */
+
+static int open_joystick(const char *device, struct joystick_device *joy, int debug)
+{
+    joy->fd = open(device, O_RDONLY | O_NONBLOCK);
+    if (joy->fd < 0)
+        return -1;
+
+    strncpy(joy->path, device, sizeof(joy->path) - 1);
+
+    if (ioctl(joy->fd, JSIOCGNAME(sizeof(joy->name)), joy->name) < 0)
+        strncpy(joy->name, "Unknown", sizeof(joy->name));
+
+    printf("Joystick connected: %s (%s)\n", joy->name, device);
+
+    memset(joy->btnState, 0, sizeof(joy->btnState));
+    joy->combo_count = load_config(joy->name, joy->combos);
+
+    if (debug)
+        printf("Loaded %d combos for joystick '%s'\n", joy->combo_count, joy->name);
+
+    return 0;
+}
+
+/* ------------------ HELPERS ------------------ */
+
+static void print_help(const char *progname)
+{
+    printf("Usage: %s [options]\n\n", progname);
+    printf("Options:\n");
+    printf("  -d              Enable debug mode (shows button presses)\n");
+    printf("  -h, --help      Show this help message and exit\n\n");
+    printf("Configuration file:\n  %s\n", CONFIG_FILE);
+}
+
+/* ------------------ JOYSTICK SLOTS ------------------ */
+
+static struct joystick_device joys[MAX_JOYSTICKS];
+static int joy_count = 0;
+
+static int find_free_slot(void)
+{
+    for (int i = 0; i < MAX_JOYSTICKS; i++)
+        if (joys[i].fd <= 0)
+            return i;
+    return -1;
+}
+
+static void remove_joystick(int slot)
+{
+    if (joys[slot].fd > 0)
+    {
+        printf("Joystick disconnected: %s (%s)\n", joys[slot].name, joys[slot].path);
+        close(joys[slot].fd);
+        memset(&joys[slot], 0, sizeof(struct joystick_device));
+        joy_count--;
+    }
+}
+
+static void add_joystick(const char *path, int debug)
+{
+    int slot = find_free_slot();
+    if (slot < 0)
+        return;
+
+    if (open_joystick(path, &joys[slot], debug) == 0)
+        joy_count++;
+}
+
+/* ------------------ MAIN LOOP ------------------ */
+
+int main(int argc, char *argv[])
+{
     int debug = 0;
 
-    // Argument parsing
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-d") == 0) debug = 1;
-        else device = argv[i];
+        if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help"))
+        {
+            print_help(argv[0]);
+            return 0;
+        }
+        else if (!strcmp(argv[i], "-d"))
+        {
+            debug = 1;
+        }
     }
 
-    // Ensure config exists
     ensure_config_exists();
+    printf("Scanning for joysticks...\n");
 
-    // Load configuration
-    struct combo combos[MAX_COMBOS];
-    int combo_count = load_config(combos);
-
-    if (combo_count == 0) {
-        printf("No valid combos found in %s\n", CONFIG_FILE);
+    for (int i = 0; i < MAX_JOYSTICKS; i++)
+    {
+        char path[32];
+        snprintf(path, sizeof(path), "/dev/input/js%d", i);
+        if (access(path, F_OK) == 0)
+            add_joystick(path, debug);
     }
 
-    int js = open(device, O_RDONLY);
-    if (js == -1) {
-        perror("Could not open joystick");
-        return 1;
-    }
+    printf("%d joystick(s) active.\n", joy_count);
 
-    struct js_event event;
-    int btnState[MAX_BUTTONS] = {0};
+    while (1)
+    {
+        static time_t last_scan = 0;
+        time_t now = time(NULL);
+        if (now - last_scan >= 2)
+        {
+            last_scan = now;
+            for (int i = 0; i < MAX_JOYSTICKS; i++)
+            {
+                char path[32];
+                snprintf(path, sizeof(path), "/dev/input/js%d", i);
 
-    if (debug) printf("joycmd running in debug mode...\n");
+                int already_open = 0;
+                for (int j = 0; j < MAX_JOYSTICKS; j++)
+                    if (joys[j].fd > 0 && !strcmp(joys[j].path, path))
+                        already_open = 1;
 
-    while (read_event(js, &event) == 0) {
-        if (event.type == JS_EVENT_BUTTON) {
-            btnState[event.number] = event.value;
-
-            if (debug)
-                printf("Button %d %s\n", event.number, event.value ? "pressed" : "released");
-
-            // Check all combos
-            for (int i = 0; i < combo_count; i++) {
-                if (check_combo(&combos[i], btnState)) {
-                    if (debug)
-                        printf("Executing: %s\n", combos[i].command);
-                    system(combos[i].command);
-                }
+                if (!already_open && access(path, F_OK) == 0)
+                    add_joystick(path, debug);
             }
         }
+
+        struct pollfd pfds[MAX_JOYSTICKS];
+        int active = 0;
+        for (int i = 0; i < MAX_JOYSTICKS; i++)
+            if (joys[i].fd > 0)
+            {
+                pfds[active].fd = joys[i].fd;
+                pfds[active].events = POLLIN;
+                active++;
+            }
+
+        if (poll(pfds, active, 500) < 0)
+            continue;
+
+        for (int i = 0; i < MAX_JOYSTICKS; i++)
+        {
+            if (joys[i].fd <= 0)
+                continue;
+
+            struct js_event e;
+            while (read_event(joys[i].fd, &e) == 0)
+            {
+                if (e.type != JS_EVENT_BUTTON)
+                    continue;
+
+                joys[i].btnState[e.number] = e.value;
+
+                if (debug)
+                    printf("[%s] Button %d %s\n", joys[i].name, e.number,
+                           e.value ? "pressed" : "released");
+
+                for (int c = 0; c < joys[i].combo_count; c++)
+                    if (check_combo(&joys[i].combos[c], joys[i].btnState))
+                    {
+                        printf("[%s] Executing: %s\n",
+                               joys[i].name, joys[i].combos[c].command);
+                        system(joys[i].combos[c].command);
+                    }
+            }
+
+            if (errno == ENODEV)
+                remove_joystick(i);
+        }
+
         fflush(stdout);
     }
 
-    close(js);
     return 0;
 }
