@@ -16,10 +16,12 @@
 #define CONFIG_DIR "/etc/joycmd"
 #define CONFIG_FILE "/etc/joycmd/joycmd.conf"
 
-struct combo {
+struct combo
+{
     int buttons[MAX_BUTTONS];
     int count;
     char command[256];
+    int active;
 };
 
 struct joystick_device
@@ -40,23 +42,13 @@ static int read_event(int fd, struct js_event *event)
     return (bytes == sizeof(*event)) ? 0 : -1;
 }
 
-static int check_combo(const struct combo *c, int *btnState)
-{
-    for (int i = 0; i < c->count; i++)
-    {
-        int btn = c->buttons[i];
-        if (btn >= 0 && !btnState[btn])
-            return 0;
-    }
-    return 1;
-}
-
 /* ------------------ CONFIG PARSING ------------------ */
 
 static int load_config(const char *joyname, struct combo combos[])
 {
     FILE *f = fopen(CONFIG_FILE, "r");
-    if (!f) {
+    if (!f)
+    {
         perror("Could not open config file");
         return 0;
     }
@@ -65,9 +57,9 @@ static int load_config(const char *joyname, struct combo combos[])
     int count = 0;
     char current_section[128] = "default";
     int in_matching_section = 0;
-    int found_specific = 0;
 
-    while (fgets(line, sizeof(line), f) && count < MAX_COMBOS) {
+    while (fgets(line, sizeof(line), f) && count < MAX_COMBOS)
+    {
         line[strcspn(line, "\r\n")] = '\0';
         if (line[0] == '#' || strlen(line) < 2)
             continue;
@@ -79,8 +71,6 @@ static int load_config(const char *joyname, struct combo combos[])
             {
                 strncpy(current_section, section, sizeof(current_section) - 1);
                 in_matching_section = (strcasecmp(current_section, joyname) == 0);
-                if (in_matching_section)
-                    found_specific = 1;
             }
             continue;
         }
@@ -89,19 +79,21 @@ static int load_config(const char *joyname, struct combo combos[])
             continue;
 
         char *eq = strchr(line, '=');
-        if (!eq) continue;
+        if (!eq)
+            continue;
 
         *eq = '\0';
         char *cmd = eq + 1;
         while (*cmd == ' ' || *cmd == '\t')
             cmd++;
 
-        struct combo c = {.count = 0};
+        struct combo c = {.count = 0, .active = 0};
         memset(c.buttons, -1, sizeof(c.buttons));
         strncpy(c.command, cmd, sizeof(c.command) - 1);
 
         char *token = strtok(line, ",");
-        while (token && c.count < MAX_BUTTONS) {
+        while (token && c.count < MAX_BUTTONS)
+        {
             c.buttons[c.count++] = atoi(token);
             token = strtok(NULL, ",");
         }
@@ -126,9 +118,11 @@ static void ensure_config_exists(void)
         return;
     }
 
-    if (stat(CONFIG_FILE, &st) == -1) {
+    if (stat(CONFIG_FILE, &st) == -1)
+    {
         FILE *f = fopen(CONFIG_FILE, "w");
-        if (!f) {
+        if (!f)
+        {
             perror("Could not create default config file");
             return;
         }
@@ -223,7 +217,8 @@ int main(int argc, char *argv[])
 {
     int debug = 0;
 
-    for (int i = 1; i < argc; i++) {
+    for (int i = 1; i < argc; i++)
+    {
         if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help"))
         {
             print_help(argv[0]);
@@ -300,13 +295,36 @@ int main(int argc, char *argv[])
                     printf("[%s] Button %d %s\n", joys[i].name, e.number,
                            e.value ? "pressed" : "released");
 
+                // ------------------ COMBO CHECK ------------------
                 for (int c = 0; c < joys[i].combo_count; c++)
-                    if (check_combo(&joys[i].combos[c], joys[i].btnState))
+                {
+                    int allPressed = 1;
+                    for (int b = 0; b < joys[i].combos[c].count; b++)
+                    {
+                        int btn = joys[i].combos[c].buttons[b];
+                        if (btn < 0)
+                            continue;
+                        if (!joys[i].btnState[btn])
+                        {
+                            allPressed = 0;
+                            break;
+                        }
+                    }
+
+                    if (allPressed && !joys[i].combos[c].active)
                     {
                         printf("[%s] Executing: %s\n",
                                joys[i].name, joys[i].combos[c].command);
                         system(joys[i].combos[c].command);
+
+                        joys[i].combos[c].active = 0;
+                        for (int d = 0; d < joys[i].combos[c].count; d++)
+                        {
+                            int comboButton = joys[i].combos[c].buttons[d];
+                            joys[i].btnState[comboButton] = 0;
+                        }
                     }
+                }
             }
 
             if (errno == ENODEV)
