@@ -3,8 +3,10 @@
 # Edit this array to include the apps you want to kill
 appsToKill=(antimicrox mangohud)
 
-# Kill all the process by the presence in appsToKill
-gamescope_pids=$(pgrep -f '^gamescope\b')
+gamescope_pids=$(pgrep -f '(^|[ /])gamescope(\.sh)?(\s|$)' | while read pid; do
+    cmd=$(ps -p "$pid" -o cmd=)
+    [[ "$cmd" == *gamescopereaper* ]] || echo "$pid"
+done)
 
 kill_tree() {
     local parent=$1
@@ -23,7 +25,7 @@ for pid in $gamescope_pids; do
     kill_tree "$pid"
 done
 
-for pattern in "${apps_to_kill[@]}"; do
+for pattern in "${appsToKill[@]}"; do
     pids=$(pgrep -f "$pattern")
     for pid in $pids; do
         kill_tree "$pid"

@@ -1,3 +1,5 @@
+#define _DEFAULT_SOURCE
+#define _POSIX_C_SOURCE 200809L
 #include <stdlib.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -5,6 +7,7 @@
 #include <linux/joystick.h>
 #include <sys/ioctl.h>
 #include <string.h>
+#include <strings.h>
 #include <errno.h>
 #include <sys/stat.h>
 #include <poll.h>
@@ -243,11 +246,17 @@ int main(int argc, char *argv[])
 
     printf("%d joystick(s) active.\n", joy_count);
 
+    struct timespec last_scan;
+    clock_gettime(CLOCK_MONOTONIC, &last_scan);
+
     while (1)
     {
-        static time_t last_scan = 0;
-        time_t now = time(NULL);
-        if (now - last_scan >= 2)
+        // Re-scan joysticks every 10 seconds
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        double elapsed = (now.tv_sec - last_scan.tv_sec) +
+                         (now.tv_nsec - last_scan.tv_nsec) / 1e9;
+        if (elapsed >= 10.0)
         {
             last_scan = now;
             for (int i = 0; i < MAX_JOYSTICKS; i++)
@@ -268,14 +277,17 @@ int main(int argc, char *argv[])
         struct pollfd pfds[MAX_JOYSTICKS];
         int active = 0;
         for (int i = 0; i < MAX_JOYSTICKS; i++)
+        {
             if (joys[i].fd > 0)
             {
                 pfds[active].fd = joys[i].fd;
                 pfds[active].events = POLLIN;
                 active++;
             }
+        }
 
-        if (poll(pfds, active, 500) < 0)
+        int ret = poll(pfds, active, 1000); // wait up to 1s
+        if (ret < 0)
             continue;
 
         for (int i = 0; i < MAX_JOYSTICKS; i++)
@@ -295,7 +307,7 @@ int main(int argc, char *argv[])
                     printf("[%s] Button %d %s\n", joys[i].name, e.number,
                            e.value ? "pressed" : "released");
 
-                // ------------------ COMBO CHECK ------------------
+                // ---- Combo check ----
                 for (int c = 0; c < joys[i].combo_count; c++)
                 {
                     int allPressed = 1;
@@ -313,25 +325,24 @@ int main(int argc, char *argv[])
 
                     if (allPressed && !joys[i].combos[c].active)
                     {
+                        joys[i].combos[c].active = 1; // mark active
                         printf("[%s] Executing: %s\n",
                                joys[i].name, joys[i].combos[c].command);
                         system(joys[i].combos[c].command);
-
-                        joys[i].combos[c].active = 0;
-                        for (int d = 0; d < joys[i].combos[c].count; d++)
-                        {
-                            int comboButton = joys[i].combos[c].buttons[d];
-                            joys[i].btnState[comboButton] = 0;
-                        }
+                    }
+                    else if (!allPressed)
+                    {
+                        joys[i].combos[c].active = 0; // reset when released
                     }
                 }
+
+                // evitar consumo excessivo de CPU se muitos eventos vierem
+                usleep(1000); // 1 ms
             }
 
             if (errno == ENODEV)
                 remove_joystick(i);
         }
-
-        fflush(stdout);
     }
 
     return 0;

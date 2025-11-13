@@ -1,0 +1,30 @@
+#!/bin/bash
+
+# Fake gamescope
+# Keep a process with "gamescope" name that encapsulates the requested process
+
+echo "FakeGamescope Received: $@"
+
+cmd_index=0
+for arg in "$@"; do
+    if [[ "$arg" == /* || "$arg" == ./* || "$arg" == *AppImage || -x "$(command -v -- "$arg")" ]]; then
+        break
+    fi
+    ((cmd_index++))
+done
+
+cmd=("${@:cmd_index+1}")
+
+if [ ${#cmd[@]} -eq 0 ]; then
+    echo "Usage: gamescope <command>"
+    exit 1
+fi
+
+echo "FakeGamescope Command: ${cmd[@]}"
+
+"${cmd[@]}" &
+child_pid=$!
+wait $child_pid
+exit_code=$?
+
+exit $exit_code
